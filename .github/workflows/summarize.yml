@@ -1,0 +1,39 @@
+name: YouTube Summarizer Bot
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # هر ۳۰ دقیقه
+  workflow_dispatch:  # دکمه برای اجرای دستی
+
+jobs:
+  summarize:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+      
+      - name: Run summarizer
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          YT_CHANNEL_ID: ${{ secrets.YT_CHANNEL_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python main.py
+      
+      - name: Commit processed list
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add processed.txt 2>/dev/null || true
+          git commit -m "Update processed videos" || echo "No changes to commit"
+          git push || echo "No changes to push"
