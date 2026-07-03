@@ -52,32 +52,50 @@ def get_transcript(video_id):
         print(f"خطا در دریافت Transcript: {e}")
         return None
 
+def format_transcript_with_timestamps(transcript):
+    """تبدیل Transcript به متن با تایم‌استمپ"""
+    if not transcript:
+        return None
+    
+    transcript_text = ""
+    for item in transcript:
+        minutes = int(item["start"] // 60)
+        seconds = int(item["start"] % 60)
+        transcript_text += f"[{minutes:02}:{seconds:02}] {item['text']}\n"
+    
+    return transcript_text
+
 def summarize_with_gemini(transcript_text):
     """خلاصه‌سازی بخش‌بندی‌شده با حفظ تایم‌استمپ"""
     if not transcript_text or len(transcript_text) < 50:
         return None
     
     prompt = f"""
-    شما یک خبرنگار حرفه‌ای هستید. متن زیر، Transcript (زیرنویس رسمی) یک ویدیوی خبری است.
-    
-    وظیفه شما:
-    ۱. متن را به بخش‌های جداگانه تقسیم کنید (هر خبر یک بخش)
-    ۲. برای هر بخش، تایم‌استمپ دقیق را پیدا کنید (از Transcript مشخص است)
-    ۳. خلاصه‌ای کوتاه و مفید (حداکثر ۱-۲ خط) از هر بخش بنویسید
-    ۴. خروجی را دقیقاً به این شکل بنویسید:
-    
-    [تایم‌استمپ] خلاصه خبر
-    
-    مثال:
-    [00:00] افزایش قیمت دلار و تاثیر آن بر بازار
-    [02:15] اعلام نتایج جدیدترین نظرسنجی‌ها
-    [04:30] تصویب لایحه جدید در مجلس
-    
-    توجه: تایم‌استمپ‌ها باید دقیقاً از روی Transcript استخراج شوند.
-    
-    متن Transcript:
-    {transcript_text[:15000]}
-    """
+شما یک خبرنگار حرفه‌ای هستید. متن زیر، Transcript (زیرنویس رسمی) یک ویدیوی خبری است که به همراه تایم‌استمپ هر بخش آمده است.
+
+متن Transcript با تایم‌استمپ:
+{transcript_text[:15000]}
+
+وظیفه شما:
+۱. متن را به بخش‌های جداگانه تقسیم کنید (هر خبر یا موضوع جداگانه یک بخش)
+۲. برای هر بخش، از اولین تایم‌استمپ همان بخش استفاده کنید
+۳. خلاصه‌ای کوتاه و مفید (حداکثر ۱-۲ خط) از هر بخش بنویسید
+۴. خروجی را دقیقاً به این شکل بنویسید:
+
+[تایم‌استمپ] خلاصه خبر
+
+مثال:
+[00:00] افزایش قیمت دلار و تاثیر آن بر بازار
+[02:15] اعلام نتایج جدیدترین نظرسنجی‌ها
+[04:30] تصویب لایحه جدید در مجلس
+
+توجه بسیار مهم:
+- تایم‌استمپ‌ها را از خودتان نسازید
+- فقط از تایم‌استمپ‌هایی که در متن Transcript وجود دارد استفاده کنید
+- هر جا موضوع عوض شد، از اولین تایم‌استمپ همان بخش استفاده کنید
+- هیچ تایم‌استمپ جدیدی نسازید
+- تایم‌استمپ‌ها را دقیقاً به فرمت [MM:SS] بنویسید
+"""
     
     try:
         response = model.generate_content(prompt)
@@ -172,9 +190,9 @@ def main():
             f.write(f"{video_id}\n")
         return
     
-    # ۴. تبدیل به متن
-    transcript_text = " ".join([item['text'] for item in transcript])
-    print(f"Transcript گرفته شد: {len(transcript_text)} کاراکتر")
+    # ۴. تبدیل به متن با تایم‌استمپ
+    transcript_text = format_transcript_with_timestamps(transcript)
+    print(f"Transcript گرفته شد: {len(transcript_text)} کاراکتر با تایم‌استمپ")
     
     # ۵. خلاصه‌سازی
     summary = summarize_with_gemini(transcript_text)
