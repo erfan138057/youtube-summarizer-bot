@@ -2,7 +2,11 @@ import os
 import requests
 import feedparser
 from datetime import datetime
-import yt_dlp
+import json
+import re
+import html
+import time
+import hashlib
 import google.generativeai as genai
 
 # گرفتن اطلاعات از Secrets
@@ -33,147 +37,259 @@ def get_latest_video_from_rss():
         return None, None, None
 
 def get_transcript(video_id):
-    """گرفتن Transcript (زیرنویس رسمی) ویدیو با استفاده از yt-dlp"""
+    """گرفتن Transcript با استفاده از API عمومی YouTube بدون نیاز به لاگین"""
     try:
-        url = f"https://www.youtube.com/watch?v={video_id}"
+        # روش اول: استفاده از YouTube's oEmbed API (برای دریافت عنوان و اطلاعات)
+        # روش دوم: استفاده از خدمات عمومی استخراج زیرنویس
         
-        # تنظیمات yt-dlp برای دریافت زیرنویس‌ها
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'skip_download': True,
-            'writesubtitles': True,
-            'writeautomaticsub': True,
-            'subtitleslangs': ['fa', 'en'],
-            'subtitlesformat': 'json3',
-        }
+        # تلاش با روش‌های مختلف
+        transcript = None
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # دریافت اطلاعات ویدیو
-            info = ydl.extract_info(url, download=False)
-            
-            # بررسی زیرنویس‌های موجود
-            subtitles = info.get('subtitles', {})
-            automatic_captions = info.get('automatic_captions', {})
-            
-            transcript_data = None
-            
-            # اولویت ۱: زیرنویس فارسی
-            if 'fa' in subtitles and subtitles['fa']:
-                transcript_data = subtitles['fa']
-                print("زیرنویس فارسی پیدا شد")
-            # اولویت ۲: زیرنویس انگلیسی
-            elif 'en' in subtitles and subtitles['en']:
-                transcript_data = subtitles['en']
-                print("زیرنویس انگلیسی پیدا شد")
-            # اولویت ۳: زیرنویس خودکار فارسی
-            elif 'fa' in automatic_captions and automatic_captions['fa']:
-                transcript_data = automatic_captions['fa']
-                print("زیرنویس خودکار فارسی پیدا شد")
-            # اولویت ۴: زیرنویس خودکار انگلیسی
-            elif 'en' in automatic_captions and automatic_captions['en']:
-                transcript_data = automatic_captions['en']
-                print("زیرنویس خودکار انگلیسی پیدا شد")
-            else:
-                print("هیچ زیرنویسی پیدا نشد")
-                return None
-            
-            if not transcript_data:
-                return None
-            
-            # پیدا کردن بهترین فرمت (معمولاً json3 یا vtt)
-            transcript_url = None
-            for sub in transcript_data:
-                if sub.get('ext') == 'json3':
-                    transcript_url = sub.get('url')
-                    break
-            
-            # اگر json3 نبود، از اولین فرمت موجود استفاده کن
-            if not transcript_url and transcript_data:
-                transcript_url = transcript_data[0].get('url')
-            
-            if not transcript_url:
-                print("آدرس زیرنویس پیدا نشد")
-                return None
-            
-            # دانلود و پردازش زیرنویس
-            response = requests.get(transcript_url)
-            if response.status_code != 200:
-                print(f"خطا در دانلود زیرنویس: {response.status_code}")
-                return None
-            
-            # پردازش JSON3
-            import json
-            try:
-                data = response.json()
-                transcript_items = []
-                
-                # استخراج متن و زمان از ساختار JSON3
-                if 'events' in data:
-                    for event in data['events']:
-                        if 'segs' in event and 'tStartMs' in event:
-                            start_time = event['tStartMs'] / 1000  # تبدیل میلی‌ثانیه به ثانیه
-                            text = ''.join([seg.get('utf8', '') for seg in event['segs']])
-                            if text.strip():
-                                transcript_items.append({
-                                    'text': text.strip(),
-                                    'start': start_time,
-                                    'duration': event.get('dDurationMs', 0) / 1000
-                                })
-                
-                if transcript_items:
-                    print(f"{len(transcript_items)} بخش زیرنویس استخراج شد")
-                    return transcript_items
-                else:
-                    print("هیچ بخش معتبری در زیرنویس پیدا نشد")
-                    return None
-                    
-            except json.JSONDecodeError:
-                print("فرمت زیرنویس JSON3 نیست، تلاش برای پردازش VTT")
-                # اگر JSON نبود، احتمالاً VTT است
-                return process_vtt_subtitle(response.text)
-                
+        # روش 1: استفاده از API عمومی "youtubetranscript" (سرویس رایگان)
+        transcript = get_transcript_from_api(video_id)
+        if transcript:
+            return transcript
+        
+        # روش 2: استخراج مستقیم از صفحه ویدیو
+        transcript = get_transcript_from_page(video_id)
+        if transcript:
+            return transcript
+        
+        # روش 3: استفاده از سرویس جایگزین
+        transcript = get_transcript_from_alternative(video_id)
+        if transcript:
+            return transcript
+        
+        return None
+        
     except Exception as e:
-        print(f"خطا در دریافت Transcript با yt-dlp: {e}")
+        print(f"خطا در دریافت Transcript: {e}")
         return None
 
-def process_vtt_subtitle(vtt_text):
-    """پردازش زیرنویس با فرمت VTT"""
+def get_transcript_from_api(video_id):
+    """استخراج زیرنویس از طریق API عمومی"""
     try:
-        import re
+        # استفاده از API عمومی برای دریافت زیرنویس
+        # این سرویس نیازی به لاگین ندارد و رایگان است
+        
+        # تلاش با فرمت‌های مختلف API
+        apis = [
+            f"https://www.youtube.com/api/timedtext?lang=fa&v={video_id}",
+            f"https://www.youtube.com/api/timedtext?lang=en&v={video_id}",
+            f"https://www.youtube.com/api/timedtext?lang=fa&v={video_id}&fmt=json3",
+            f"https://www.youtube.com/api/timedtext?lang=en&v={video_id}&fmt=json3",
+        ]
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        
+        for api_url in apis:
+            try:
+                response = requests.get(api_url, headers=headers, timeout=15)
+                if response.status_code == 200:
+                    # بررسی فرمت پاسخ
+                    content_type = response.headers.get('content-type', '')
+                    
+                    if 'json' in content_type or api_url.endswith('fmt=json3'):
+                        try:
+                            data = response.json()
+                            if 'events' in data:
+                                transcript_items = []
+                                for event in data['events']:
+                                    if 'segs' in event and 'tStartMs' in event:
+                                        start_time = event['tStartMs'] / 1000
+                                        text = ''.join([seg.get('utf8', '') for seg in event['segs']])
+                                        if text.strip():
+                                            transcript_items.append({
+                                                'text': text.strip(),
+                                                'start': start_time,
+                                                'duration': event.get('dDurationMs', 0) / 1000
+                                            })
+                                if transcript_items:
+                                    print(f"API: {len(transcript_items)} بخش زیرنویس استخراج شد")
+                                    return transcript_items
+                        except:
+                            pass
+                    else:
+                        # احتمالاً فرمت XML
+                        transcript_items = parse_xml_subtitle(response.text)
+                        if transcript_items:
+                            print(f"API XML: {len(transcript_items)} بخش زیرنویس استخراج شد")
+                            return transcript_items
+            except Exception as e:
+                continue
+        
+        return None
+        
+    except Exception as e:
+        print(f"خطا در API: {e}")
+        return None
+
+def parse_xml_subtitle(xml_text):
+    """پردازش زیرنویس با فرمت XML"""
+    try:
+        import xml.etree.ElementTree as ET
+        
+        # حذف xmlns برای ساده‌تر شدن پردازش
+        xml_text = re.sub(r'xmlns="[^"]*"', '', xml_text)
+        
+        root = ET.fromstring(xml_text)
         transcript_items = []
         
-        # الگوی VTT: زمان‌ها و متن
-        # مثال: 00:00:01.234 --> 00:00:02.345
-        pattern = r'(\d{2}):(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})\.(\d{3})\s*\n([^\n]+)'
-        
-        matches = re.findall(pattern, vtt_text)
-        
-        for match in matches:
-            # تبدیل زمان شروع به ثانیه
-            hours = int(match[0])
-            minutes = int(match[1])
-            seconds = int(match[2])
-            milliseconds = int(match[3])
-            
-            start_time = hours * 3600 + minutes * 60 + seconds + milliseconds / 1000
-            text = match[8].strip()
+        for text_elem in root.findall('.//text'):
+            start = float(text_elem.get('start', 0))
+            duration = float(text_elem.get('dur', 0))
+            text = html.unescape(text_elem.text or '').strip()
             
             if text:
                 transcript_items.append({
                     'text': text,
-                    'start': start_time,
-                    'duration': 0  # مدت زمان دقیق مشخص نیست
+                    'start': start,
+                    'duration': duration
                 })
         
         if transcript_items:
-            print(f"{len(transcript_items)} بخش از VTT استخراج شد")
+            print(f"XML: {len(transcript_items)} بخش زیرنویس استخراج شد")
             return transcript_items
-        else:
-            return None
-            
+        
+        return None
+        
     except Exception as e:
-        print(f"خطا در پردازش VTT: {e}")
+        print(f"خطا در پردازش XML: {e}")
+        return None
+
+def get_transcript_from_page(video_id):
+    """استخراج زیرنویس از صفحه ویدیو با استفاده از داده‌های JSON درون صفحه"""
+    try:
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+        }
+        
+        response = requests.get(url, headers=headers, timeout=15)
+        if response.status_code != 200:
+            return None
+        
+        html_content = response.text
+        
+        # جستجوی داده‌های JSON در صفحه
+        patterns = [
+            r'var ytInitialPlayerResponse = ({.*?});',
+            r'ytInitialPlayerResponse\s*=\s*({.*?});',
+            r'<script[^>]*>.*?ytInitialPlayerResponse\s*=\s*({.*?});.*?</script>',
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, html_content, re.DOTALL)
+            if match:
+                try:
+                    data = json.loads(match.group(1))
+                    
+                    # بررسی وجود زیرنویس
+                    if 'captions' in data and 'playerCaptionsTracklistRenderer' in data['captions']:
+                        captions = data['captions']['playerCaptionsTracklistRenderer']
+                        
+                        # اولویت: زیرنویس فارسی
+                        for caption in captions.get('captionTracks', []):
+                            lang = caption.get('languageCode', '')
+                            if lang in ['fa', 'en']:
+                                base_url = caption.get('baseUrl', '')
+                                if base_url:
+                                    # دریافت زیرنویس
+                                    sub_response = requests.get(base_url, headers=headers, timeout=15)
+                                    if sub_response.status_code == 200:
+                                        # تشخیص فرمت
+                                        if 'json' in sub_response.headers.get('content-type', '').lower():
+                                            try:
+                                                sub_data = sub_response.json()
+                                                if 'events' in sub_data:
+                                                    transcript_items = []
+                                                    for event in sub_data['events']:
+                                                        if 'segs' in event and 'tStartMs' in event:
+                                                            start_time = event['tStartMs'] / 1000
+                                                            text = ''.join([seg.get('utf8', '') for seg in event['segs']])
+                                                            if text.strip():
+                                                                transcript_items.append({
+                                                                    'text': text.strip(),
+                                                                    'start': start_time,
+                                                                    'duration': event.get('dDurationMs', 0) / 1000
+                                                                })
+                                                    if transcript_items:
+                                                        print(f"صفحه: {len(transcript_items)} بخش زیرنویس استخراج شد")
+                                                        return transcript_items
+                                            except:
+                                                pass
+                                        else:
+                                            # فرمت XML
+                                            transcript_items = parse_xml_subtitle(sub_response.text)
+                                            if transcript_items:
+                                                print(f"صفحه XML: {len(transcript_items)} بخش زیرنویس استخراج شد")
+                                                return transcript_items
+                except:
+                    continue
+        
+        return None
+        
+    except Exception as e:
+        print(f"خطا در استخراج از صفحه: {e}")
+        return None
+
+def get_transcript_from_alternative(video_id):
+    """استخراج زیرنویس از سرویس‌های جایگزین"""
+    try:
+        # استفاده از سرویس عمومی برای استخراج زیرنویس
+        # این سرویس‌ها رایگان و بدون نیاز به لاگین هستند
+        
+        services = [
+            {
+                'url': f'https://yt.lemnoslife.com/api/video?videoId={video_id}&part=subtitles',
+                'parser': 'lemnos'
+            },
+            {
+                'url': f'https://api.sproutvideo.com/v1/videos/{video_id}/subtitles',
+                'parser': 'sprout'
+            }
+        ]
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+        }
+        
+        for service in services:
+            try:
+                response = requests.get(service['url'], headers=headers, timeout=15)
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    # پردازش بر اساس نوع سرویس
+                    if service['parser'] == 'lemnos':
+                        if 'subtitles' in data and data['subtitles']:
+                            for sub in data['subtitles']:
+                                if sub.get('language') in ['fa', 'en']:
+                                    transcript_items = []
+                                    for item in sub.get('subtitles', []):
+                                        transcript_items.append({
+                                            'text': item.get('text', ''),
+                                            'start': item.get('start', 0),
+                                            'duration': item.get('duration', 0)
+                                        })
+                                    if transcript_items:
+                                        print(f"جایگزین: {len(transcript_items)} بخش زیرنویس استخراج شد")
+                                        return transcript_items
+            except:
+                continue
+        
+        return None
+        
+    except Exception as e:
+        print(f"خطا در سرویس جایگزین: {e}")
         return None
 
 def format_transcript_with_timestamps(transcript):
