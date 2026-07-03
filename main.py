@@ -24,37 +24,47 @@ def get_latest_video_from_rss():
         if feed.entries:
             video_id = feed.entries[0].yt_videoid
             title = feed.entries[0].title
-            return video_id, title
-        return None, None
+            # گرفتن لینک thumbnail
+            thumbnail = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
+            return video_id, title, thumbnail
+        return None, None, None
     except Exception as e:
         print(f"خطا در RSS: {e}")
-        return None, None
+        return None, None, None
 
 def get_transcript(video_id):
-    """گرفتن زیرنویس ویدیو"""
+    """گرفتن Transcript (زیرنویس رسمی) ویدیو"""
     try:
+        # لیست تمام Transcript های موجود
         transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        # اولویت با زیرنویس فارسی، انگلیسی یا خودکار
+        
+        # اولویت: Transcript فارسی، انگلیسی یا خودکار
         try:
             transcript = transcript_list.find_transcript(['fa', 'en'])
         except:
             transcript = transcript_list.find_generated_transcript(['en'])
         
-        return transcript.fetch()
+        # اگر Transcript پیدا شد
+        if transcript:
+            return transcript.fetch()
+        return None
     except Exception as e:
-        print(f"خطا در دریافت زیرنویس: {e}")
+        print(f"خطا در دریافت Transcript: {e}")
         return None
 
 def summarize_with_gemini(transcript_text):
-    """خلاصه‌سازی بخش‌بندی‌شده با Gemini"""
+    """خلاصه‌سازی بخش‌بندی‌شده با حفظ تایم‌استمپ"""
+    if not transcript_text or len(transcript_text) < 50:
+        return None
+    
     prompt = f"""
-    شما یک خبرنگار حرفه‌ای هستید. متن زیر زیرنویس یک ویدیوی خبری است.
+    شما یک خبرنگار حرفه‌ای هستید. متن زیر، Transcript (زیرنویس رسمی) یک ویدیوی خبری است.
     
     وظیفه شما:
-    ۱. متن را به بخش‌های جداگانه (هر خبر یک بخش) تقسیم کنید
-    ۲. برای هر بخش، تایم‌استمپ دقیق را پیدا کنید
-    ۳. خلاصه‌ای کوتاه و مفید از هر بخش بنویسید
-    ۴. خروجی را به شکل زیر بنویسید:
+    ۱. متن را به بخش‌های جداگانه تقسیم کنید (هر خبر یک بخش)
+    ۲. برای هر بخش، تایم‌استمپ دقیق را پیدا کنید (از Transcript مشخص است)
+    ۳. خلاصه‌ای کوتاه و مفید (حداکثر ۱-۲ خط) از هر بخش بنویسید
+    ۴. خروجی را دقیقاً به این شکل بنویسید:
     
     [تایم‌استمپ] خلاصه خبر
     
@@ -63,7 +73,9 @@ def summarize_with_gemini(transcript_text):
     [02:15] اعلام نتایج جدیدترین نظرسنجی‌ها
     [04:30] تصویب لایحه جدید در مجلس
     
-    متن زیرنویس:
+    توجه: تایم‌استمپ‌ها باید دقیقاً از روی Transcript استخراج شوند.
+    
+    متن Transcript:
     {transcript_text[:15000]}
     """
     
@@ -74,8 +86,49 @@ def summarize_with_gemini(transcript_text):
         print(f"خطا در Gemini: {e}")
         return None
 
-def send_to_telegram(message):
-    """ارسال پیام به تلگرام"""
+def send_to_telegram_with_photo(title, thumbnail_url, summary, video_url):
+    """ارسال پیام با عکس به تلگرام"""
+    try:
+        # ۱. ساخت متن پیام
+        caption = f"📺 <b>{title}</b>\n\n━━━━━━━━━━━━━━━━\n{summary}\n━━━━━━━━━━━━━━━━\n🔗 {video_url}"
+        
+        # ۲. ارسال با عکس
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+        
+        # اگه خلاصه خیلی طولانی بود، به چند بخش تقسیم کن
+        if len(caption) > 4000:
+            # فقط خلاصه رو تقسیم کن
+            parts = [caption[i:i+4000] for i in range(0, len(caption), 4000)]
+            
+            # بخش اول با عکس
+            payload = {
+                'chat_id': TELEGRAM_CHAT_ID,
+                'photo': thumbnail_url,
+                'caption': parts[0],
+                'parse_mode': 'HTML'
+            }
+            requests.post(url, json=payload)
+            
+            # بخش‌های بعدی بدون عکس
+            for part in parts[1:]:
+                send_to_telegram_text(part)
+        else:
+            # ارسال یکجا با عکس
+            payload = {
+                'chat_id': TELEGRAM_CHAT_ID,
+                'photo': thumbnail_url,
+                'caption': caption,
+                'parse_mode': 'HTML'
+            }
+            response = requests.post(url, json=payload)
+            return response.ok
+            
+    except Exception as e:
+        print(f"خطا در ارسال به تلگرام: {e}")
+        return False
+
+def send_to_telegram_text(message):
+    """ارسال پیام متنی ساده به تلگرام"""
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         payload = {
@@ -86,14 +139,14 @@ def send_to_telegram(message):
         response = requests.post(url, json=payload)
         return response.ok
     except Exception as e:
-        print(f"خطا در ارسال به تلگرام: {e}")
+        print(f"خطا در ارسال متن: {e}")
         return False
 
 def main():
     print(f"شروع بررسی در {datetime.now()}")
     
     # ۱. گرفتن آخرین ویدیو
-    video_id, title = get_latest_video_from_rss()
+    video_id, title, thumbnail = get_latest_video_from_rss()
     if not video_id:
         print("ویدیویی پیدا نشد")
         return
@@ -109,38 +162,30 @@ def main():
             print("این ویدیو قبلاً پردازش شده")
             return
     
-    # ۳. دریافت زیرنویس
+    # ۳. دریافت Transcript
     transcript = get_transcript(video_id)
     if not transcript:
-        msg = f"📺 <b>{title}</b>\n\n⚠️ این ویدیو زیرنویس ندارد.\n🔗 https://youtu.be/{video_id}"
-        send_to_telegram(msg)
-        # ذخیره میکنیم تا دوباره چک نکنه
+        # اگه Transcript نداشت، فقط لینک رو بفرست
+        msg = f"📺 <b>{title}</b>\n\n⚠️ این ویدیو Transcript ندارد.\n🔗 https://youtu.be/{video_id}"
+        send_to_telegram_with_photo(title, thumbnail, "⚠️ این ویدیو Transcript ندارد.", f"https://youtu.be/{video_id}")
         with open(processed_file, 'a') as f:
             f.write(f"{video_id}\n")
         return
     
     # ۴. تبدیل به متن
-    full_text = " ".join([item['text'] for item in transcript])
-    print(f"زیرنویس گرفته شد: {len(full_text)} کاراکتر")
+    transcript_text = " ".join([item['text'] for item in transcript])
+    print(f"Transcript گرفته شد: {len(transcript_text)} کاراکتر")
     
     # ۵. خلاصه‌سازی
-    summary = summarize_with_gemini(full_text)
+    summary = summarize_with_gemini(transcript_text)
     if not summary:
         msg = f"📺 <b>{title}</b>\n\n❌ خطا در خلاصه‌سازی\n🔗 https://youtu.be/{video_id}"
-        send_to_telegram(msg)
+        send_to_telegram_with_photo(title, thumbnail, "❌ خطا در خلاصه‌سازی", f"https://youtu.be/{video_id}")
         return
     
-    # ۶. ارسال به تلگرام
+    # ۶. ارسال به تلگرام با عکس
     video_url = f"https://youtu.be/{video_id}"
-    message = f"📺 <b>{title}</b>\n\n━━━━━━━━━━━━━━━━\n{summary}\n━━━━━━━━━━━━━━━━\n🔗 {video_url}"
-    
-    # اگه پیام طولانی بود، چند بخش کن
-    if len(message) > 4000:
-        parts = [message[i:i+4000] for i in range(0, len(message), 4000)]
-        for part in parts:
-            send_to_telegram(part)
-    else:
-        send_to_telegram(message)
+    send_to_telegram_with_photo(title, thumbnail, summary, video_url)
     
     # ۷. ذخیره آی‌دی ویدیو
     with open(processed_file, 'a') as f:
