@@ -2,8 +2,6 @@ import os
 import requests
 import feedparser
 from datetime import datetime
-from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled
 import google.generativeai as genai
 
 # گرفتن اطلاعات از Secrets
@@ -11,6 +9,7 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 YT_CHANNEL_ID = os.environ.get('YT_CHANNEL_ID')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+SUPADATA_API_KEY = os.environ.get('SUPADATA_API_KEY')
 
 # تنظیم Gemini
 genai.configure(api_key=GEMINI_API_KEY)
@@ -32,34 +31,45 @@ def get_latest_video_from_rss():
         return None, None, None
 
 def get_transcript(video_id):
-    """گرفتن Transcript با استفاده از youtube-transcript-api v1.x"""
-    api = YouTubeTranscriptApi()
-
-    # اولویت: فارسی، انگلیسی، هر زبانی
-    for langs in [['fa'], ['en'], ['fa', 'en']]:
-        try:
-            transcript = api.fetch(video_id, languages=langs)
-            # در v1.x مستقیماً قابل iterate است
-            return [{'text': s.text, 'start': s.start} for s in transcript]
-        except NoTranscriptFound:
-            continue
-        except TranscriptsDisabled:
-            print(f"Transcript برای {video_id} غیرفعال است")
-            return None
-        except Exception as e:
-            print(f"خطا برای زبان {langs}: {e}")
-            continue
-
-    # تلاش آخر: هر زبانی که موجود باشد
+    """گرفتن Transcript از طریق Supadata API"""
     try:
-        transcript_list = api.list(video_id)
-        for t in transcript_list:
-            fetched = t.fetch()
-            return [{'text': s.text, 'start': s.start} for s in fetched]
+        url = "https://api.supadata.ai/v1/youtube/transcript"
+        params = {
+            "videoId": video_id,
+            "lang": "fa"  # اول فارسی
+        }
+        headers = {"x-api-key": SUPADATA_API_KEY}
+
+        response = requests.get(url, params=params, headers=headers, timeout=30)
+
+        # اگه فارسی نداشت، انگلیسی امتحان کن
+        if response.status_code == 404 or (response.ok and not response.json().get("content")):
+            params["lang"] = "en"
+            response = requests.get(url, params=params, headers=headers, timeout=30)
+
+        if not response.ok:
+            print(f"خطای Supadata: {response.status_code} - {response.text}")
+            return None
+
+        data = response.json()
+        content = data.get("content", [])
+
+        if not content:
+            print("Transcript خالی برگشت")
+            return None
+
+        # تبدیل به فرمت استاندارد
+        return [
+            {
+                "text": item["text"],
+                "start": item["offset"] / 1000  # از میلی‌ثانیه به ثانیه
+            }
+            for item in content
+        ]
+
     except Exception as e:
         print(f"خطا در دریافت Transcript: {e}")
-
-    return None
+        return None
 
 def summarize_with_gemini(transcript_text):
     """خلاصه‌سازی بخش‌بندی‌شده با حفظ تایم‌استمپ"""
@@ -173,7 +183,7 @@ def main():
             f.write(f"{video_id}\n")
         return
 
-    # ۴. تبدیل به متن (با تایم‌استمپ برای Gemini)
+    # ۴. تبدیل به متن با تایم‌استمپ
     transcript_text = " ".join([
         f"[{int(item['start']//60):02d}:{int(item['start']%60):02d}] {item['text']}"
         for item in transcript
