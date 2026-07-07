@@ -85,32 +85,44 @@ def summarize_with_gemini(transcript_text):
     {transcript_text[:15000]}
     """
 
-    try:
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt
-        )
-        return response.text
-    except Exception as e:
-        print(f"خطا در Gemini: {e}")
-        return None
+    import time
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt
+            )
+            return response.text
+        except Exception as e:
+            print(f"خطا در Gemini (تلاش {attempt+1}/3): {e}")
+            if attempt < 2:
+                wait = 30 * (attempt + 1)  # 30s, 60s
+                print(f"دوباره امتحان در {wait} ثانیه...")
+                time.sleep(wait)
+    return None
 
 def send_to_telegram_with_photo(title, thumbnail_url, summary, video_url):
     """ارسال پیام با عکس به تلگرام"""
     try:
-        caption = f"📺 <b>{title}</b>\n\n━━━━━━━━━━━━━━━━\n{summary}\n━━━━━━━━━━━━━━━━\n🔗 {video_url}"
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+        # اول عکس رو بفرست
+        photo_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+        photo_payload = {
+            'chat_id': TELEGRAM_CHAT_ID,
+            'photo': thumbnail_url,
+            'caption': f"📺 <b>{title}</b>\n🔗 {video_url}",
+            'parse_mode': 'HTML'
+        }
+        r = requests.post(photo_url, json=photo_payload, timeout=15)
+        print(f"ارسال عکس: {r.status_code} - {r.text[:200]}")
 
-        if len(caption) > 4000:
-            parts = [caption[i:i+4000] for i in range(0, len(caption), 4000)]
-            payload = {'chat_id': TELEGRAM_CHAT_ID, 'photo': thumbnail_url, 'caption': parts[0], 'parse_mode': 'HTML'}
-            requests.post(url, json=payload)
-            for part in parts[1:]:
-                send_to_telegram_text(part)
-        else:
-            payload = {'chat_id': TELEGRAM_CHAT_ID, 'photo': thumbnail_url, 'caption': caption, 'parse_mode': 'HTML'}
-            response = requests.post(url, json=payload)
-            return response.ok
+        # بعد خلاصه رو بفرست (جداگانه، تا مشکل طول نداشته باشیم)
+        text = f"━━━━━━━━━━━━━━━━\n{summary}\n━━━━━━━━━━━━━━━━"
+        # تقسیم به بخش‌های 4000 کاراکتری
+        for i in range(0, len(text), 4000):
+            part = text[i:i+4000]
+            send_to_telegram_text(part)
+
+        return r.ok
 
     except Exception as e:
         print(f"خطا در ارسال به تلگرام: {e}")
@@ -160,15 +172,19 @@ def main():
 
     summary = summarize_with_gemini(transcript_text)
     if not summary:
-        send_to_telegram_with_photo(title, thumbnail, "❌ خطا در خلاصه‌سازی", f"https://youtu.be/{video_id}")
+        # خطا در Gemini — ثبت نمیکنیم تا دفعه بعد دوباره امتحان بشه
+        print("خلاصه‌سازی ناموفق بود، دفعه بعد دوباره امتحان میشه")
         return
 
-    send_to_telegram_with_photo(title, thumbnail, summary, f"https://youtu.be/{video_id}")
+    sent = send_to_telegram_with_photo(title, thumbnail, summary, f"https://youtu.be/{video_id}")
 
-    with open(processed_file, 'a') as f:
-        f.write(f"{video_id}\n")
-
-    print("پردازش کامل شد!")
+    # فقط بعد از ارسال موفق ثبت میکنیم
+    if sent:
+        with open(processed_file, 'a') as f:
+            f.write(f"{video_id}\n")
+        print("پردازش کامل شد!")
+    else:
+        print("ارسال به تلگرام ناموفق بود، دفعه بعد دوباره امتحان میشه")
 
 if __name__ == "__main__":
     main()
